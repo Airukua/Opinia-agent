@@ -1,4 +1,4 @@
-import { OverviewContent } from "@/components/dashboard/overview-content"
+import { OverviewContent } from "@/components/dashboard/overview/overview-content"
 import { DashboardPageShell } from "@/components/dashboard/page-shell"
 
 export default function Page() {

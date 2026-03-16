@@ -21,7 +21,7 @@ from agents.sentiment.sentiment_agent import SentimentAgentConfig, run_sentiment
 from agents.spam.spam_agent import SpamAgentConfig, run_spam_agent
 from agents.toxicity.toxic_agent import ToxicAgentConfig, run_toxic_agent
 from agents.topic.topic_agent import TopicAgentConfig, run_topic_agent
-from pipeline.evidence_merger import (
+from pipeline.evidence import (
     EvidenceMergeConfig,
     merge_evidence_and_insights,
     save_split_outputs,
@@ -323,7 +323,7 @@ def run_orchestrator(
 
     recursive_config = None
     if llm_include_history is not None:
-        from pipeline.evidence_merger import RecursiveInsightConfig
+        from pipeline.evidence import RecursiveInsightConfig
 
         recursive_config = RecursiveInsightConfig(include_environment_history=llm_include_history)
 

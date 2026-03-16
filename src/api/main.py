@@ -4,10 +4,12 @@ import os
 import sys
 import time
 import uuid
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +24,7 @@ for _path in (str(_ROOT), str(_SRC)):
         sys.path.insert(0, _path)
 
 from pipeline.orchestrator import run_orchestrator
+from utils.report import _write_pdf_report as write_pdf_report
 from utils.youtube_url_normalizer import extract_video_id
 
 # Load .env when running the API directly (uvicorn doesn't auto-load it).
@@ -230,6 +233,8 @@ def root() -> Dict[str, str]:
         "analyze": "/analyze",
         "docs": "/docs",
         "results": "/results/{filename}",
+        "report_pdf": "/results/{filename}/report.pdf",
+        "raw_comments": "/results/{filename}/comments.csv",
     }
 
 
@@ -245,6 +250,115 @@ def get_result_file(filename: str) -> FileResponse:
     if not target.exists():
         raise HTTPException(status_code=404, detail="file_not_found")
     return FileResponse(str(target), media_type="application/json")
+
+
+@app.get("/results/{filename}/report.pdf")
+def get_result_pdf(filename: str) -> FileResponse:
+    """Downloads a generated PDF report for a result JSON file."""
+    payload = _load_result_payload(filename)
+    base = Path(OUTPUT_BASE_DIR).resolve()
+    source_path = (base / filename).resolve()
+    report_path = _build_export_path(base, filename, suffix="_report.pdf")
+    report_template_path = Path(__file__).resolve().parents[1] / "utils" / "report.py"
+    should_regen = not report_path.exists()
+    if not should_regen and source_path.exists():
+        try:
+            should_regen = report_path.stat().st_mtime < source_path.stat().st_mtime
+        except OSError:
+            should_regen = True
+    if not should_regen and report_template_path.exists():
+        try:
+            should_regen = report_path.stat().st_mtime < report_template_path.stat().st_mtime
+        except OSError:
+            should_regen = True
+    if should_regen:
+        write_pdf_report(payload, report_path)
+    return FileResponse(
+        str(report_path),
+        media_type="application/pdf",
+        filename=report_path.name,
+    )
+
+
+@app.get("/results/{filename}/comments.csv")
+def get_result_comments(filename: str) -> FileResponse:
+    """Downloads raw comments as CSV for a result JSON file."""
+    payload = _load_result_payload(filename)
+    comments = payload.get("comments")
+    if not isinstance(comments, list) or not comments:
+        raise HTTPException(status_code=404, detail="comments_not_found")
+    base = Path(OUTPUT_BASE_DIR).resolve()
+    csv_path = _build_export_path(base, filename, suffix="_comments.csv")
+    if not csv_path.exists():
+        _write_comments_csv(comments, csv_path)
+    return FileResponse(str(csv_path), media_type="text/csv", filename=csv_path.name)
+
+
+def _load_result_payload(filename: str) -> Dict[str, Any]:
+    """Loads and validates a result JSON payload from disk."""
+    if not filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="invalid_filename")
+    base = Path(OUTPUT_BASE_DIR).resolve()
+    target = (base / filename).resolve()
+    if base not in target.parents:
+        raise HTTPException(status_code=400, detail="invalid_filename")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="file_not_found")
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="invalid_result_json") from exc
+
+
+def _build_export_path(base_dir: Path, filename: str, *, suffix: str) -> Path:
+    """Builds a safe export path for derived downloads."""
+    stem = Path(filename).name
+    if stem.endswith(".json"):
+        stem = stem[: -len(".json")]
+    export_path = (base_dir / f"{stem}{suffix}").resolve()
+    if base_dir not in export_path.parents:
+        raise HTTPException(status_code=400, detail="invalid_filename")
+    return export_path
+
+
+def _write_comments_csv(comments: List[Dict[str, Any]], output_path: Path) -> None:
+    """Writes readable comments to CSV."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    comments_df = _normalize_comments_frame(comments)
+    if not comments_df.empty:
+        columns = [
+            "comment_id",
+            "author",
+            "published_at",
+            "like_count",
+            "text",
+            "sentiment.label",
+            "spam.label",
+            "toxicity.label",
+        ]
+        available = [col for col in columns if col in comments_df.columns]
+        if available:
+            comments_df = comments_df[available]
+    comments_df.to_csv(output_path, index=False)
+
+
+def _normalize_comments_frame(comments: List[Dict[str, Any]]) -> pd.DataFrame:
+    if not comments:
+        return pd.DataFrame()
+    return pd.json_normalize(comments)
+
+
+def _dict_to_kv_frame(payload: Dict[str, Any]) -> pd.DataFrame:
+    if not payload:
+        return pd.DataFrame()
+    rows = []
+    for key, value in payload.items():
+        if isinstance(value, (dict, list)):
+            rows.append({"key": key, "value": json.dumps(value, ensure_ascii=False)})
+        else:
+            rows.append({"key": key, "value": value})
+    return pd.DataFrame(rows)
 
 
 @app.post("/analyze", response_model=OrchestrateResponse)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -164,7 +165,12 @@ def _label_topic_with_llm(
         f"{_prepare_llm_payload(cluster_data, cfg=cfg)}"
     )
     try:
-        result = client.chat(system_prompt=system_prompt, user_prompt=user_prompt, model=llm_model)
+        raw_text = client.chat_text(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=llm_model,
+        )
+        result = _parse_topic_label_response(raw_text)
         return {
             "topic_label": str(result.get("topic_label", "Unknown topic")).strip(),
             "rationale": str(result.get("rationale", "")).strip(),
@@ -176,6 +182,63 @@ def _label_topic_with_llm(
             "topic_label": fallback,
             "rationale": "Fallback label generated from LDA keywords due to LLM error.",
         }
+
+
+def _parse_topic_label_response(text: str) -> Dict[str, Any]:
+    """Parses LLM topic-label response into JSON with light repair."""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    extracted = _extract_json(text)
+    if isinstance(extracted, dict):
+        return extracted
+
+    repaired = _repair_json_text(text)
+    try:
+        parsed = json.loads(repaired)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    return {}
+
+
+def _extract_json(text: str) -> Optional[Any]:
+    """Best-effort JSON extractor from a mixed model response."""
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[idx:])
+            return parsed
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _repair_json_text(text: str) -> str:
+    """Attempts to repair common JSON issues from LLM output."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    start = min([i for i in (cleaned.find("{"), cleaned.find("[")) if i != -1], default=0)
+    end_curly = cleaned.rfind("}")
+    end_bracket = cleaned.rfind("]")
+    end = max(end_curly, end_bracket)
+    if end > start:
+        cleaned = cleaned[start : end + 1]
+
+    cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'")
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    return cleaned
 
 
 def run_topic_agent(comments: pd.DataFrame | List[Dict[str, Any]], config: Optional[TopicAgentConfig] = None) -> Dict[str, Any]:
